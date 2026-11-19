@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+backend/venv/
+__pycache__/
+*.pyc
+
+# Next.js
+.next/
+out/
+build/
+dist/
+
+# SQLite & Graph persistent storage
+*.db
+*.db-journal
+knowledge_graph.json
+
+# Environment & Logs
+.env
+.env.local
+*.log
