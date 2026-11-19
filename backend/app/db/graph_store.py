@@ -1,24 +1,44 @@
 """
 Embedded Knowledge Graph Engine.
-Uses NetworkX with persistent JSON serialization to model personal entities,
-family relations, life events, dependencies, financial assets, and goals.
+Uses NetworkX with persistent storage in PostgreSQL/AlloyDB and JSON fallback
+to model personal entities, family relations, life events, dependencies, financial assets, and goals.
 """
 
 import os
 import json
+from datetime import datetime
 import networkx as nx
 from typing import Dict, List, Any, Optional
+from app.db.relational import get_db_connection, IS_POSTGRES
 
-GRAPH_FILE = os.path.join(os.path.dirname(__file__), "knowledge_graph.json")
+GRAPH_FILE = os.getenv("GRAPH_FILE_PATH", os.path.join(os.path.dirname(__file__), "knowledge_graph.json"))
 
 
 class KnowledgeGraphStore:
-    def __init__(self, file_path: str = GRAPH_FILE):
+    def __init__(self, file_path: str = GRAPH_FILE, user_id: str = "default_user"):
         self.file_path = file_path
+        self.user_id = user_id
         self.graph = nx.MultiDiGraph()
         self.load()
 
     def load(self):
+        # 1. Try loading from PostgreSQL / AlloyDB if connected
+        if IS_POSTGRES:
+            try:
+                conn = get_db_connection()
+                row = conn.execute(
+                    "SELECT graph_json FROM knowledge_graphs WHERE user_id = ?",
+                    (self.user_id,)
+                ).fetchone()
+                conn.close()
+                if row and row.get("graph_json"):
+                    data = json.loads(row["graph_json"])
+                    self.graph = nx.node_link_graph(data, multigraph=True, directed=True, edges="links")
+                    return
+            except Exception as e:
+                print(f"[GraphStore] AlloyDB graph load fallback: {e}")
+
+        # 2. Fall back to local JSON file
         if os.path.exists(self.file_path):
             try:
                 with open(self.file_path, "r", encoding="utf-8") as f:
@@ -30,12 +50,42 @@ class KnowledgeGraphStore:
         self.graph = nx.MultiDiGraph()
 
     def save(self):
+        data = nx.node_link_data(self.graph, edges="links")
+        data_json = json.dumps(data, indent=2)
+
+        # 1. Persist to PostgreSQL / AlloyDB
+        if IS_POSTGRES:
+            try:
+                conn = get_db_connection()
+                now = datetime.now().isoformat()
+                if conn.is_postgres:
+                    conn.execute("""
+                        INSERT INTO knowledge_graphs (user_id, graph_json, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT (user_id) DO UPDATE SET graph_json = EXCLUDED.graph_json, updated_at = EXCLUDED.updated_at
+                    """, (self.user_id, data_json, now))
+                else:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO knowledge_graphs (user_id, graph_json, updated_at)
+                        VALUES (?, ?, ?)
+                    """, (self.user_id, data_json, now))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"[GraphStore] AlloyDB graph save error: {e}")
+
+        # 2. Persist to local JSON file
         try:
-            data = nx.node_link_data(self.graph, edges="links")
             with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+                f.write(data_json)
         except Exception as e:
-            print(f"[GraphStore] Error saving graph: {e}")
+            # Container read-only filesystem or /tmp fallback
+            try:
+                fallback_path = os.path.join("/tmp", "knowledge_graph.json")
+                with open(fallback_path, "w", encoding="utf-8") as f:
+                    f.write(data_json)
+            except Exception:
+                pass
 
     def add_node(self, node_id: str, label: str, properties: Optional[Dict[str, Any]] = None):
         """Adds or updates a node with a primary label and arbitrary attributes."""
@@ -65,7 +115,7 @@ class KnowledgeGraphStore:
 
     def get_user_subgraph(self, user_id: str = "user_self") -> Dict[str, Any]:
         """
-        Returns nodes and links formatted for frontend visualization (e.g. D3 / Cytoscape / SVG graph).
+        Returns nodes and links formatted for frontend visualization.
         """
         self.load()
         if not self.graph.has_node(user_id):

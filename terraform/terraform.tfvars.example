@@ -1,0 +1,31 @@
+# ==============================================================================
+# GH Wealth Management AI Coach - Terraform Input Variables Example
+# Copy this file to terraform.tfvars and fill in your actual values
+# ==============================================================================
+
+# Required: Google Cloud Project ID
+project_id = "YOUR_GCP_PROJECT_ID"
+
+# Deployment Region (AlloyDB + Cloud Run + Artifact Registry)
+region = "us-central1"
+
+# VPC Configuration
+vpc_name    = "wm-coach-vpc"
+subnet_name = "wm-coach-subnet"
+subnet_cidr = "10.0.0.0/24"
+
+# Artifact Registry Repository Name
+artifact_repo_name = "wm-coach-repo"
+
+# Gemini API Key (from https://aistudio.google.com/)
+# Placeholder: replace with your actual key
+gemini_api_key = "YOUR_GEMINI_API_KEY_HERE"
+
+# AlloyDB for PostgreSQL Master Password
+# Placeholder: replace with a strong database password
+db_password = "YOUR_ALLOYDB_PASSWORD_HERE"
+
+# GitHub Continuous Deployment Configuration
+github_repo_owner = "EaseMyWorld"
+github_repo_name  = "gh-wm-coach"
+github_branch     = "^main$"

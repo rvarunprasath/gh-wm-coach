@@ -1,30 +1,108 @@
 """
-Relational / Tabular Data Layer (SQLite).
+Relational / Tabular Data Layer with Dual-Backend Support:
+- PostgreSQL / Google Cloud AlloyDB for PostgreSQL (Production)
+- SQLite (Local development / fallback)
+
 Provides mathematical precision for financial ledgers, account balances,
 equity/mutual fund holdings, transactions, and numeric goal tracking.
 """
 
-import sqlite3
-import json
 import os
+import json
+import sqlite3
+import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+# AlloyDB / PostgreSQL Configuration
+DB_HOST = os.getenv("DB_HOST", "")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "financial_coach")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+IS_POSTGRES = bool(DATABASE_URL or DB_HOST)
 DB_FILE = os.path.join(os.path.dirname(__file__), "financial_ledger.db")
 
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
 
-def get_db_connection():
+
+class DBConnectionWrapper:
+    """
+    Unified database connection wrapper for both SQLite and PostgreSQL/AlloyDB.
+    Normalizes cursor behavior, placeholder syntax (? -> %s), and row access.
+    """
+    def __init__(self, raw_conn, is_postgres: bool):
+        self.raw_conn = raw_conn
+        self.is_postgres = is_postgres
+
+    def cursor(self):
+        if self.is_postgres:
+            return self.raw_conn.cursor(cursor_factory=RealDictCursor)
+        return self.raw_conn.cursor()
+
+    def execute(self, query: str, params: tuple = ()):
+        cur = self.cursor()
+        if self.is_postgres:
+            # Map SQLite '?' placeholder to Postgres '%s'
+            pg_query = query.replace("?", "%s")
+            cur.execute(pg_query, params)
+            return cur
+        else:
+            return cur.execute(query, params)
+
+    def commit(self):
+        self.raw_conn.commit()
+
+    def rollback(self):
+        self.raw_conn.rollback()
+
+    def close(self):
+        self.raw_conn.close()
+
+
+def get_db_connection() -> DBConnectionWrapper:
+    """
+    Returns an active database connection.
+    If DB_HOST or DATABASE_URL is configured and psycopg2 is available, connects to AlloyDB/PostgreSQL.
+    Otherwise falls back to local SQLite.
+    """
+    if IS_POSTGRES and PSYCOPG2_AVAILABLE:
+        try:
+            if DATABASE_URL:
+                conn = psycopg2.connect(DATABASE_URL)
+            else:
+                conn = psycopg2.connect(
+                    host=DB_HOST,
+                    port=int(DB_PORT),
+                    dbname=DB_NAME,
+                    user=DB_USER,
+                    password=DB_PASSWORD,
+                    connect_timeout=10
+                )
+            return DBConnectionWrapper(conn, is_postgres=True)
+        except Exception as e:
+            print(f"[Database] AlloyDB/Postgres connection failed: {e}. Falling back to SQLite.")
+
+    # SQLite fallback
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
-    return conn
+    return DBConnectionWrapper(conn, is_postgres=False)
 
 
 def init_relational_db():
+    """Initializes schema for relational ledger in AlloyDB/PostgreSQL or SQLite."""
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    # Users
-    cursor.execute("""
+    # Users Table
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -37,41 +115,38 @@ def init_relational_db():
     );
     """)
 
-    # Accounts (Bank accounts, Demat, EPF, etc.)
-    cursor.execute("""
+    # Accounts Table
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS accounts (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
         institution_name TEXT NOT NULL,
-        account_type TEXT NOT NULL, -- SAVINGS, DEMAT, MUTUAL_FUND, EPF, NPS
+        account_type TEXT NOT NULL,
         account_number_masked TEXT,
         balance REAL NOT NULL,
         currency TEXT DEFAULT 'INR',
-        last_synced_at TEXT,
-        FOREIGN KEY (user_id) REFERENCES users (id)
+        last_synced_at TEXT
     );
     """)
 
-    # Holdings (Individual stocks, MF schemes, Gold, Real Estate)
-    cursor.execute("""
+    # Holdings Table
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS holdings (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
         account_id TEXT,
-        asset_type TEXT NOT NULL, -- EQUITY, MUTUAL_FUND, DEBT, GOLD, REAL_ESTATE, LIQUID
+        asset_type TEXT NOT NULL,
         asset_name TEXT NOT NULL,
         symbol TEXT,
         units REAL,
         avg_buy_price REAL,
         current_value REAL NOT NULL,
-        updated_at TEXT,
-        FOREIGN KEY (user_id) REFERENCES users (id),
-        FOREIGN KEY (account_id) REFERENCES accounts (id)
+        updated_at TEXT
     );
     """)
 
-    # Transactions
-    cursor.execute("""
+    # Transactions Table
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS transactions (
         id TEXT PRIMARY KEY,
         account_id TEXT NOT NULL,
@@ -79,37 +154,43 @@ def init_relational_db():
         description TEXT NOT NULL,
         category TEXT NOT NULL,
         amount REAL NOT NULL,
-        type TEXT NOT NULL, -- CREDIT, DEBIT
-        FOREIGN KEY (account_id) REFERENCES accounts (id)
+        type TEXT NOT NULL
     );
     """)
 
-    # Life Goals
-    cursor.execute("""
+    # Life Goals Table
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS life_goals (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
         title TEXT NOT NULL,
-        category TEXT NOT NULL, -- EDUCATION, RETIREMENT, HOME, VEHICLE, EMERGENCY
+        category TEXT NOT NULL,
         target_amount REAL NOT NULL,
         target_year INTEGER NOT NULL,
         accumulated_amount REAL DEFAULT 0,
         priority TEXT DEFAULT 'High',
-        status TEXT DEFAULT 'IN_PROGRESS',
-        FOREIGN KEY (user_id) REFERENCES users (id)
+        status TEXT DEFAULT 'IN_PROGRESS'
     );
     """)
 
     # Extracted Facts Log
-    cursor.execute("""
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS extracted_facts (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
-        source TEXT NOT NULL, -- CHAT, VOICE, STATEMENT, API
+        source TEXT NOT NULL,
         raw_text TEXT,
         extracted_json TEXT,
-        applied_at TEXT,
-        FOREIGN KEY (user_id) REFERENCES users (id)
+        applied_at TEXT
+    );
+    """)
+
+    # Knowledge Graph Persistence Table (ensures multi-instance Cloud Run sync)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_graphs (
+        user_id TEXT PRIMARY KEY,
+        graph_json TEXT NOT NULL,
+        updated_at TEXT
     );
     """)
 

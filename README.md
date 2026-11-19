@@ -109,3 +109,17 @@ npm run dev
    - Click **"Upload Statement"** in the top bar and test with the pre-loaded **HDFC Bank CSV** or **Zerodha Holdings CSV** to see automatic statement processing and graph synchronization.
 4. **API Integration**:
    - Click **"Connect API"** to simulate linking with **Zerodha Kite**, **Groww**, or **RBI Account Aggregators** with one click.
+
+---
+
+## ☁️ Cloud Deployment (Cloud Run, AlloyDB, Gemini & Cloud Build)
+
+Complete production cloud deployment instructions, Terraform configurations, and CI/CD pipelines are available in **[DEPLOYMENT.md](file:///Users/arunprasathrv/Documents/batcave/weave/gh-wm-coach/DEPLOYMENT.md)**.
+
+- **Frontend Microservice**: Next.js 14 deployed to Google Cloud Run (`wm-coach-frontend`).
+- **Backend Microservice**: FastAPI GraphRAG engine deployed to Google Cloud Run (`wm-coach-backend`).
+- **Database**: Google Cloud **AlloyDB for PostgreSQL** with Private Services Access (PSA).
+- **AI Reasoning**: Google **Gemini AI** (`gemini-2.0-flash`) via Google AI Studio API key or Vertex AI.
+- **Networking**: Custom VPC (`wm-coach-vpc`) with **Direct VPC Egress** connecting Cloud Run to AlloyDB on private IP.
+- **CI/CD Pipelines**: Automated Google Cloud Build triggers on push to [https://github.com/EaseMyWorld/gh-wm-coach](https://github.com/EaseMyWorld/gh-wm-coach).
+- **Quick Setup**: Run `./scripts/setup-gcp-infra.sh` or `terraform apply` in `./terraform`.

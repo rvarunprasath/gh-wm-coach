@@ -15,7 +15,7 @@ def seed_initial_financial_data(rel_store: RelationalStore, graph_store: Knowled
     # Always ensure user exists in Relational DB
     if not user_exists:
         conn.execute("""
-            INSERT OR REPLACE INTO users (id, name, email, currency, monthly_income, monthly_expenses, risk_profile, created_at)
+            INSERT INTO users (id, name, email, currency, monthly_income, monthly_expenses, risk_profile, created_at)
             VALUES (?, ?, ?, 'INR', 150000, 65000, 'Moderate', ?)
         """, (user_id, "Rahul Sharma", user_email, datetime.now().isoformat()))
         conn.commit()

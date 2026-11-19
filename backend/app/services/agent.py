@@ -1,15 +1,32 @@
 """
 GraphRAG AI Financial Coach Agent.
-Combines exact numerical figures from the Relational Ledger with contextual
-dependencies from the Knowledge Graph to deliver grounded financial advisory.
+Combines exact numerical figures from the Relational Ledger (AlloyDB / SQLite) with contextual
+dependencies from the Knowledge Graph and Google Gemini AI to deliver grounded financial advisory.
 """
 
 import os
-from typing import Dict, Any, List
+import re
+from typing import Dict, Any, List, Optional
 from app.db.relational import RelationalStore
 from app.db.graph_store import KnowledgeGraphStore
 from app.services.extractor import FinancialFactExtractor
 from app.models.schemas import ChatResponse, ReasoningTrace
+
+# Gemini Configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+USE_VERTEXAI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() in ("true", "1")
+GCP_PROJECT = os.getenv("GCP_PROJECT", os.getenv("GOOGLE_CLOUD_PROJECT", ""))
+GCP_LOCATION = os.getenv("GCP_REGION", "us-central1")
+
+
+def is_valid_gemini_config() -> bool:
+    """Checks whether valid Gemini API Key or Vertex AI credentials are configured."""
+    if USE_VERTEXAI and GCP_PROJECT:
+        return True
+    if GEMINI_API_KEY and not GEMINI_API_KEY.startswith("PLACEHOLDER") and not GEMINI_API_KEY.startswith("YOUR_"):
+        return True
+    return False
 
 
 class FinancialCoachAgent:
@@ -28,7 +45,7 @@ class FinancialCoachAgent:
         Main entry point for conversational turn.
         1. Extracts new facts & updates stores
         2. Retrieves dual-store context (Graph + Tables)
-        3. Formulates grounded coaching response
+        3. Formulates grounded coaching response via Gemini (with rule-based fallback)
         """
         # Step 1: Extract entities, holdings, family, or events from utterance
         extracted_data, actions = self.extractor.extract_and_sync(
@@ -60,25 +77,35 @@ class FinancialCoachAgent:
         risk_profile = user_node.get("risk_profile", "Moderate")
 
         # Step 4: Build Reasoning Trace
+        gemini_status = "Active (Connected)" if is_valid_gemini_config() else "Rule-based Fallback (Set GEMINI_API_KEY)"
         trace = ReasoningTrace(
             graph_context_used=[
-                f"User Profile ({risk_profile} Risk)",
+                f"User Profile ({risk_profile} Risk) | LLM: {gemini_status}",
                 f"Knowledge Graph: {graph_summary.splitlines()[1] if len(graph_summary.splitlines()) > 1 else 'Base Profile'}"
             ],
             accounts_consulted=[f"{a['institution_name']} ({a['account_type']}): ₹{a['balance']:,.0f}" for a in accounts],
             facts_extracted=actions
         )
 
-        # Step 5: Generate Advisory Response
-        lower_msg = message.lower()
-        response_text = self._synthesize_advisory(
+        # Step 5: Generate Advisory Response via Gemini (with fallback)
+        response_text = self._generate_with_gemini(
             user_message=message,
-            lower_msg=lower_msg,
             portfolio=portfolio,
             graph_summary=graph_summary,
             actions=actions,
             risk_profile=risk_profile
         )
+
+        if not response_text:
+            lower_msg = message.lower()
+            response_text = self._synthesize_advisory(
+                user_message=message,
+                lower_msg=lower_msg,
+                portfolio=portfolio,
+                graph_summary=graph_summary,
+                actions=actions,
+                risk_profile=risk_profile
+            )
 
         return ChatResponse(
             reply=response_text,
@@ -86,6 +113,89 @@ class FinancialCoachAgent:
             updated_portfolio=updated_portfolio,
             updated_graph=updated_graph
         )
+
+    def _generate_with_gemini(
+        self,
+        user_message: str,
+        portfolio: Dict[str, Any],
+        graph_summary: str,
+        actions: List[str],
+        risk_profile: str
+    ) -> Optional[str]:
+        """Calls Google Gemini model with full Dual-Store Context."""
+        if not is_valid_gemini_config():
+            return None
+
+        # Build GraphRAG Context
+        net_worth = portfolio.get("net_worth", 0.0)
+        income = portfolio.get("monthly_income", 150000.0)
+        expenses = portfolio.get("monthly_expenses", 65000.0)
+        monthly_savings = portfolio.get("monthly_savings", income - expenses)
+        allocations = portfolio.get("allocations", [])
+        holdings = portfolio.get("holdings", [])
+        accounts = portfolio.get("accounts", [])
+        goals = portfolio.get("goals", [])
+
+        alloc_str = ", ".join([f"{a['asset_class']}: ₹{a['value']:,.0f} ({a['percentage']}%)" for a in allocations])
+        holdings_str = "; ".join([f"{h['asset_name']} ({h['asset_type']}): ₹{h['current_value']:,.0f}" for h in holdings[:8]])
+        accounts_str = "; ".join([f"{a['institution_name']} ({a['account_type']}): ₹{a['balance']:,.0f}" for a in accounts])
+        goals_str = "; ".join([f"{g['title']} (Target ₹{g['target_amount']:,.0f} in {g['target_year']})" for g in goals])
+        actions_str = "; ".join(actions) if actions else "None"
+
+        system_instruction = (
+            "You are the GH Wealth Management AI Financial Coach. You provide personalized, mathematically precise, "
+            "and empathetic financial advisory grounded in a Dual-Store Architecture (Relational Ledger + Embedded Knowledge Graph). "
+            "Always ground numbers in the user's specific financial ledger. Format answers cleanly in Markdown with bold values, "
+            "bullet points, and clear next steps."
+        )
+
+        user_prompt = f"""
+### User Context (Relational Ledger & Knowledge Graph):
+- Risk Profile: {risk_profile}
+- Consolidated Net Worth: ₹{net_worth:,.0f}
+- Monthly Cash Flow: Income ₹{income:,.0f} | Expenses ₹{expenses:,.0f} | Monthly Savings Surplus: ₹{monthly_savings:,.0f}
+- Asset Class Allocations: {alloc_str}
+- Accounts & Liquid Balances: {accounts_str}
+- Key Holdings: {holdings_str}
+- Life Goals & Milestones: {goals_str}
+- Knowledge Graph Semantic Memory: {graph_summary}
+- Recent Action / Facts Extracted: {actions_str}
+
+### User's Question / Statement:
+"{user_message}"
+
+Please provide actionable, mathematically sound wealth management coaching addressing their question, explaining how it impacts their net worth, liquidity runway, and life milestones in their knowledge graph.
+"""
+
+        try:
+            # 1. Try google-genai SDK (recommended)
+            try:
+                from google import genai
+                if USE_VERTEXAI and GCP_PROJECT:
+                    client = genai.Client(vertexai=True, project=GCP_PROJECT, location=GCP_LOCATION)
+                else:
+                    client = genai.Client(api_key=GEMINI_API_KEY)
+                
+                response = client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=user_prompt,
+                )
+                if response and response.text:
+                    return response.text
+            except ImportError:
+                # 2. Try google-generativeai SDK
+                import google.generativeai as genai_legacy
+                genai_legacy.configure(api_key=GEMINI_API_KEY)
+                model = genai_legacy.GenerativeModel(
+                    model_name=GEMINI_MODEL,
+                    system_instruction=system_instruction
+                )
+                response = model.generate_content(user_prompt)
+                if response and response.text:
+                    return response.text
+        except Exception as e:
+            print(f"[Gemini] Inference error: {e}. Falling back to rule-based synthesis.")
+            return None
 
     def _synthesize_advisory(
         self,
@@ -132,8 +242,6 @@ class FinancialCoachAgent:
 
         # Scenario B: Affordability / Purchase Question (e.g., "Can I buy a 50 lakh house / apartment in 2 years?")
         if any(w in lower_msg for w in ["buy", "afford", "purchase"]) and any(w in lower_msg for w in ["house", "home", "flat", "apartment", "car", "property"]):
-            # Extract target price if mentioned
-            import re
             price_match = re.search(r"([\d\.]+)\s*(?:crore|crores|cr|lakh|lakhs|lac|lacs|l)", lower_msg)
             target_cost = 5000000.0
             if price_match:
@@ -145,11 +253,9 @@ class FinancialCoachAgent:
             if yr_match:
                 horizon_years = int(yr_match.group(1))
 
-            # Financial projections
             projected_new_savings = monthly_savings * (horizon_years * 12)
-            down_payment_needed = target_cost * 0.20  # 20% down payment
+            down_payment_needed = target_cost * 0.20
             loan_amount = target_cost * 0.80
-            # Approx EMI for 20 years @ 8.5% = ₹8.68 per 1000
             estimated_emi = round(loan_amount * 0.00868)
             surplus_after_emi = monthly_savings - estimated_emi
 

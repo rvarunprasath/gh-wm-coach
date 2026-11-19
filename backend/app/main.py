@@ -4,8 +4,9 @@ FastAPI Main Application Entry Point.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.db.relational import RelationalStore
+from app.db.relational import RelationalStore, IS_POSTGRES
 from app.db.graph_store import KnowledgeGraphStore
+from app.services.agent import is_valid_gemini_config
 from app.services.seed_data import seed_initial_financial_data
 from app.api.chat import router as chat_router
 from app.api.portfolio import router as portfolio_router
@@ -40,7 +41,7 @@ async def startup_event():
     rel_store = RelationalStore()
     graph_store = KnowledgeGraphStore()
     seed_initial_financial_data(rel_store, graph_store, "default_user")
-    print("[Startup] System ready with seeded profile & knowledge graph.")
+    print(f"[Startup] System ready. Database: {'AlloyDB/PostgreSQL' if IS_POSTGRES else 'SQLite'}. Gemini: {'Active' if is_valid_gemini_config() else 'Fallback'}.")
 
 
 @app.get("/")
@@ -49,4 +50,13 @@ async def root():
         "app": "AI Financial Coach API",
         "status": "healthy",
         "endpoints": ["/api/chat", "/api/portfolio", "/api/graph", "/api/ingest/upload", "/api/ingest/connect-api"]
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "database": "alloydb" if IS_POSTGRES else "sqlite",
+        "gemini": "active" if is_valid_gemini_config() else "fallback"
     }
